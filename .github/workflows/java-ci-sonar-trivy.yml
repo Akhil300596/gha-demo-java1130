@@ -1,48 +1,117 @@
-name: CI Java 18 App using SonarQube
+name: CI - Build, Scan, Push and Update GitOps Manifest
 
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "k8s/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: boardgame-main-deployment
+  cancel-in-progress: false
+
 jobs:
-  build:
+  build-push-update:
     runs-on: ubuntu-latest
     steps:
-      # 1. Checkout source code
-      - name: Code Checkout
+      - name: Checkout source code
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      # 2. Setup Java 18
+
       - name: Set up JDK 18
         uses: actions/setup-java@v6
         with:
-          java-version: '18'
-          distribution: 'temurin'
+          java-version: "18"
+          distribution: temurin
           cache: maven
 
-      # 3. Verify Java version
-      - name: Check Java Version
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Verify Java and Maven versions
         run: |
           java -version
           mvn -version
-      # 4. Build + SonarQube Analysis
-      - name: Build and SonarQube Analysis
+
+      - name: Build and run SonarQube analysis
         run: |
           mvn -B clean verify \
             org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
             -Dsonar.projectKey=Boardgame \
-            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
-            -Dsonar.token=${{ secrets.SONAR_TOKEN }}
-      - name: Build Docker Image
+            -Dsonar.host.url="${{ secrets.SONAR_HOST_URL }}" \
+            -Dsonar.token="${{ secrets.SONAR_TOKEN }}"
+
+      - name: Create immutable image name and tag
+        id: image
+        shell: bash
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          docker_username="${DOCKER_USERNAME,,}"
+          image_tag="${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
+          image_name="${docker_username}/java-gha"
+          echo "name=${image_name}" >> "$GITHUB_OUTPUT"
+          echo "tag=${image_tag}" >> "$GITHUB_OUTPUT"
+          echo "full=${image_name}:${image_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for scanning
         uses: docker/build-push-action@v6
         with:
           context: .
+          load: true
           push: false
-          tags: kuragayalaakhil/java-gha:latest
-      - name: Scan Docker image with trivy
-        uses: aquasecurity/trivy-action@master
+          tags: |
+            ${{ steps.image.outputs.full }}
+            ${{ steps.image.outputs.name }}:latest
+
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: kuragayalaakhil/java-gha:latest
+          image-ref: ${{ steps.image.outputs.full }}
           severity: CRITICAL,HIGH
-          exit-code: 1
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Push images to Docker Hub
+        run: |
+          docker push "${{ steps.image.outputs.full }}"
+          docker push "${{ steps.image.outputs.name }}:latest"
+
+      - name: Update Kubernetes image version
+        run: |
+          python scripts/update_image.py \
+            --file k8s/deployment-service.yaml \
+            --container boardgame \
+            --image "${{ steps.image.outputs.full }}"
+
+      - name: Commit updated Kubernetes manifest
+        env:
+          IMAGE: ${{ steps.image.outputs.full }}
+        run: |
+          if git diff --quiet -- k8s/deployment-service.yaml; then
+            echo "Manifest already uses ${IMAGE}; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add k8s/deployment-service.yaml
+          git commit -m "chore(gitops): deploy ${IMAGE} [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
