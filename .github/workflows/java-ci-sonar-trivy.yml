@@ -5,7 +5,8 @@ on:
     branches:
       - main
     paths-ignore:
-      - "k8s/**"
+      - "deploy.yml"
+
   workflow_dispatch:
 
 permissions:
@@ -18,6 +19,7 @@ concurrency:
 jobs:
   build-push-update:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout source code
         uses: actions/checkout@v7
@@ -30,11 +32,6 @@ jobs:
           java-version: "18"
           distribution: temurin
           cache: maven
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
 
       - name: Verify Java and Maven versions
         run: |
@@ -58,6 +55,7 @@ jobs:
           docker_username="${DOCKER_USERNAME,,}"
           image_tag="${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}"
           image_name="${docker_username}/java-gha"
+
           echo "name=${image_name}" >> "$GITHUB_OUTPUT"
           echo "tag=${image_tag}" >> "$GITHUB_OUTPUT"
           echo "full=${image_name}:${image_tag}" >> "$GITHUB_OUTPUT"
@@ -82,7 +80,7 @@ jobs:
             ${{ steps.image.outputs.name }}:latest
 
       - name: Scan Docker image with Trivy
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.full }}
           severity: CRITICAL,HIGH
@@ -94,24 +92,41 @@ jobs:
           docker push "${{ steps.image.outputs.full }}"
           docker push "${{ steps.image.outputs.name }}:latest"
 
-      - name: Update Kubernetes image version
+      - name: Install yq
         run: |
-          python scripts/update_image.py \
-            --file k8s/deployment-service.yaml \
-            --container boardgame \
-            --image "${{ steps.image.outputs.full }}"
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.47.2/yq_linux_amd64
 
-      - name: Commit updated Kubernetes manifest
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Update image version in deploy.yml
         env:
           IMAGE: ${{ steps.image.outputs.full }}
         run: |
-          if git diff --quiet -- k8s/deployment-service.yaml; then
-            echo "Manifest already uses ${IMAGE}; nothing to commit."
+          yq -i \
+            '(select(.kind == "Deployment").spec.template.spec.containers[] | select(.name == "boardgame").image) = strenv(IMAGE)' \
+            deploy.yml
+
+          echo "Updated image in deploy.yml:"
+          yq \
+            'select(.kind == "Deployment") | .spec.template.spec.containers[].image' \
+            deploy.yml
+
+      - name: Commit updated deploy.yml
+        env:
+          IMAGE: ${{ steps.image.outputs.full }}
+        run: |
+          if git diff --quiet -- deploy.yml; then
+            echo "deploy.yml already uses ${IMAGE}; nothing to commit."
             exit 0
           fi
+
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add k8s/deployment-service.yaml
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add deploy.yml
           git commit -m "chore(gitops): deploy ${IMAGE} [skip ci]"
           git pull --rebase origin main
           git push origin HEAD:main
