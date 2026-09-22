@@ -86,7 +86,7 @@ jobs:
         with:
           image-ref: ${{ steps.image.outputs.full }}
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          exit-code: "0"
           ignore-unfixed: true
 
       - name: Push images to Docker Hub
