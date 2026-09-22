@@ -15,12 +15,11 @@ spec:
     spec:
       containers:
         - name: boardgame
-          image: kuragayalaakhil/java-gha:initial
+          image: kuragayalaakhil/java-gha:7-c74bfbc
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
-
 ---
 apiVersion: v1
 kind: Service
