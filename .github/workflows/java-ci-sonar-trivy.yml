@@ -39,7 +39,7 @@ jobs:
         with:
           context: .
           push: false
-          tags: kuchalakantikris/java-gha:latest
+          tags: kuragayalaakhil/java-gha:latest
       - name: Scan Docker image with trivy
         uses: aquasecurity/trivy-action@master
         with:
